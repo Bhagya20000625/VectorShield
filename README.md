@@ -1,4 +1,4 @@
-# VectorShield - Backend API
+# VectorShield
 
 🛡️ Advanced sanctions screening backend with fuzzy name matching capabilities.
 
@@ -143,14 +143,6 @@ The React.js frontend is maintained in a separate repository:
 - [ ] Authentication & authorization
 - [ ] WebSocket support for real-time updates
 
-## License
-
-[Add your license here]
-
-## Contributing
-
-[Add contribution guidelines]
-
 ## Contact
 
-[Add your contact information]
+[warlordshad@gmail.com]
