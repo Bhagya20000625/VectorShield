@@ -1,4 +1,4 @@
-# VectorShield - Backend API
+# VectorShield
 
 🛡️ Advanced sanctions screening backend with fuzzy name matching capabilities.
 
@@ -9,9 +9,7 @@ This is the **backend API** for VectorShield. The frontend is built separately u
 ## Features
 
 - ✅ **Fuzzy Name Matching** - 80% similarity threshold using RapidFuzz
-- ✅ **Hash-based Exact Matching** - Lightning-fast exact searches
 - ✅ **Batch File Upload** - Process CSV/Excel files with multiple records
-- ✅ **Multi-stage Search** - Three filtering stages for different use cases
 - ✅ **PDF/Excel Export** - Generate comprehensive reports
 - ✅ **Analytics & Risk Scoring** - Automated risk assessment
 - ✅ **REST API** - `/check` endpoint for external integrations
@@ -63,7 +61,7 @@ mkdir Excel_files uploads Auto_Check
 
 Start the Flask API server:
 ```bash
-python TC.py
+python VectorShield.py
 ```
 
 The API server will be available at `http://localhost:5000`
@@ -114,7 +112,7 @@ Get detailed analytics and risk scoring for search results.
 
 ```
 VectorShield-Backend/
-├── TC.py                    # Main Flask API server
+├── VectorShield.py         # Main Flask API server
 ├── filemanager.py          # Database management app
 ├── Excel_files/            # Sanctions database (gitignored)
 ├── uploads/                # User uploads (gitignored)
@@ -143,14 +141,6 @@ The React.js frontend is maintained in a separate repository:
 - [ ] Authentication & authorization
 - [ ] WebSocket support for real-time updates
 
-## License
-
-[Add your license here]
-
-## Contributing
-
-[Add contribution guidelines]
-
 ## Contact
 
-[Add your contact information]
+[warlordshad@gmail.com]

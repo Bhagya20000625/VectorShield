@@ -35,6 +35,16 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 NAME_VARIANTS = ['name', 'names', 'first name', 'second name', 'third name']
 REQUIRED_COLUMNS = ['NIC', 'Passport', 'Address1', 'Phone11', 'Birth Day', 'First Name', 'Last Name']
 
+# Columns to index for the /check endpoint only - keeps it fast and precise
+CHECK_INDEX_COLUMNS = {
+    'name', 'original script name', 'aliases',
+    'reference number', 'document number', 'dl/ passport no.', 'nic no.', 'id',
+    'date of birth', 'place of birth', 'nationality', 'citizenship',
+    'address', 'address (sri lanka)', 'address (foreign)',
+}
+
+CHECK_NAME_PARTS = {'first name', 'second name', 'third name'}
+
 def load_ignore_keywords():
     if os.path.exists(KEYWORDS_FILE):
         with open(KEYWORDS_FILE, 'r') as f:
@@ -54,11 +64,30 @@ def save_ignore_keywords(keywords):
 
 IGNORE_KEYWORDS = load_ignore_keywords()
 
+def tokenize_alphanumeric(value):
+    """    
+    Returns a set of normalized variations for indexing/searching
+    """
+    if not isinstance(value, str) or len(value) < 5:
+        return {value}
+    
+    tokens = {value}  
+    
+    # This will match transitions like: a1, 1a, ab12, 12ab
+    spaced_version = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', value)
+    spaced_version = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', spaced_version)  
+    
+    if spaced_version != value:
+        tokens.add(spaced_version)
+    
+    return tokens
+
 def load_all_excel_files(folder_path):
     print("Loading excel files and building hash-based search index...")
     start_time = time.time()
     excel_data = {}
     hash_index = {}
+    check_hash_index = {}  
     record_id_map = {}
     
     files = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xls'))]
@@ -108,6 +137,12 @@ def load_all_excel_files(folder_path):
                                                 if subpart_hash not in hash_index:
                                                     hash_index[subpart_hash] = []
                                                 hash_index[subpart_hash].append((filename, idx, col, value, record_id))
+                                                
+                                                # Also index subparts in check_hash_index if they are in CHECK_INDEX_COLUMNS
+                                                if col.lower() in CHECK_INDEX_COLUMNS:
+                                                    if subpart_hash not in check_hash_index:
+                                                        check_hash_index[subpart_hash] = []
+                                                    check_hash_index[subpart_hash].append((filename, idx, col, value, record_id))
                         
                         # Directly index space-separated parts
                         elif ' ' in value:
@@ -123,21 +158,24 @@ def load_all_excel_files(folder_path):
             print(f"Error loading {filename}: {e}")
     
     print(f"Finished loading {len(excel_data)} files and building index with {len(hash_index)} keys in {time.time() - start_time:.2f} seconds")
-    return excel_data, hash_index, record_id_map
+    return excel_data, hash_index, check_hash_index, record_id_map
 
-all_excel_data, hash_index, record_id_map = load_all_excel_files(EXCEL_FOLDER)
+all_excel_data, hash_index, check_hash_index, record_id_map = load_all_excel_files(EXCEL_FOLDER)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def fuzzy_search(query, field=None, threshold=80):
-    """Fuzzy search across all records using similarity matching"""
+    """Fuzzy search across all records using similarity matching with smart tokenization"""
     query = str(query).lower().strip()
     if len(query) < 3:
         return "Query must be at least 3 characters long.", pd.DataFrame(), query
     
     if any(keyword.lower() in query for keyword in IGNORE_KEYWORDS):
         return "Query contains ignored keyword(s).", pd.DataFrame(), query
+    
+    # Tokenize query for alphanumeric handling
+    query_tokens = tokenize_alphanumeric(query)
     
     results = []
     seen_records = set()  # Avoid duplicates
@@ -156,17 +194,27 @@ def fuzzy_search(query, field=None, threshold=80):
                 
                 value = row[col]
                 if isinstance(value, str) and len(value) >= 3:
-                    # Calculate similarity score
-                    similarity = fuzz.ratio(query, value)
+                    # Tokenize cell value for alphanumeric handling
+                    value_tokens = tokenize_alphanumeric(value)
                     
-                    # Also check partial matches for longer strings
-                    if len(value) > 10:
-                        partial_similarity = fuzz.partial_ratio(query, value)
-                        similarity = max(similarity, partial_similarity)
-                    
-                    # Check token-based similarity (word order independent)
-                    token_similarity = fuzz.token_sort_ratio(query, value)
-                    similarity = max(similarity, token_similarity)
+                    # Try all combinations of query tokens vs value tokens
+                    similarity = 0
+                    for q_token in query_tokens:
+                        for v_token in value_tokens:
+                            # Calculate similarity score
+                            score = fuzz.ratio(q_token, v_token)
+                            
+                            # Also check partial matches for longer strings
+                            if len(v_token) > 10:
+                                partial_score = fuzz.partial_ratio(q_token, v_token)
+                                score = max(score, partial_score)
+                            
+                            # Check token-based similarity (word order independent)
+                            token_score = fuzz.token_sort_ratio(q_token, v_token)
+                            score = max(score, token_score)
+                            
+                            # Keep the best similarity across all token combinations
+                            similarity = max(similarity, score)
 
                     
                     if similarity >= threshold:
@@ -247,12 +295,6 @@ def process_excel_file(file_path):
 
 # Add a new function for the multi-stage search
 def search_from_uploaded_data_staged(df, stage=1):
-    """
-    Performs a search with different filtering stages:
-    - Stage 1: Search by MID, NIC, Passport, or Phone11 (exact match on any)
-    - Stage 2: Search by First Name OR Last Name (any one matches)
-    - Stage 3: Search by First Name AND Last Name (both must match)
-    """
     start_time = time.time()
     print(f"Processing {len(df)} records on GPU with stage {stage}...")
     
