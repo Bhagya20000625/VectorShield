@@ -27,7 +27,102 @@ ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls'}
 MAX_WORKERS = 4
 KEYWORDS_FILE = 'ignore_keywords.json'
 
-DEFAULT_IGNORE_KEYWORDS = [' Kumar', 'mohammad', 'muhammad', 'muhammed', 'mohammed', 'ahamad', 'kumar', 'Kumar']
+DEFAULT_IGNORE_KEYWORDS = [
+    ' Kumar', 'mohammad', 'muhammad', 'muhammed', 'mohammed', 'ahamad', 'kumar', 'Kumar'
+]
+# Ignored name prefixes/common words specifically for the /check endpoint.
+# --- search_by_index ported from mod/ter.py ---
+def search_by_index(query, field=None):
+    query = str(query).lower().strip()
+    if len(query) < 5:
+        return "Query must be at least 5 characters long.", pd.DataFrame(), query
+    if any(keyword.lower() in query for keyword in IGNORE_KEYWORDS):
+        return "Query contains ignored keyword(s).", pd.DataFrame(), query
+    results = []
+    seen_records = set()
+    # Get all query token variations using alphanumeric tokenization
+    query_tokens = tokenize_alphanumeric(query)
+    for query_variant in query_tokens:
+        query_hash = hash(query_variant)  # Use hash for fast lookup
+        # Check if the query hash exists in the index
+        if query_hash in hash_index:
+            for filename, idx, col, original_value, record_id in hash_index[query_hash]:
+                # Skip if we already added this record
+                if record_id in seen_records:
+                    continue
+                if field is None or field == col:
+                    # For comma-separated values, check if query matches any part exactly
+                    if ',' in original_value or ' ' in original_value:
+                        # Split by both commas and spaces
+                        parts = []
+                        # First split by commas
+                        comma_parts = [part.strip().lower() for part in original_value.split(',')]
+                        # Then split each comma part by spaces if needed
+                        for part in comma_parts:
+                            if len(part) >= 5:  # Only consider parts that are long enough
+                                parts.append(part)
+                            # Split by spaces
+                            space_parts = [sp.strip().lower() for sp in part.split()]
+                            for sp in space_parts:
+                                if len(sp) >= 5:  # Only consider parts that are long enough
+                                    parts.append(sp)
+                        # Check all tokenized versions of parts
+                        match_found = False
+                        for part in parts:
+                            part_tokens = tokenize_alphanumeric(part)
+                            if query_variant in part_tokens:
+                                match_found = True
+                                break
+                        if match_found:
+                            row = all_excel_data[filename].iloc[idx].copy()
+                            row['Source File'] = filename
+                            row['Matched Term'] = query
+                            row['record_id'] = record_id
+                            results.append(row)
+                            seen_records.add(record_id)
+                    # Also check for full cell match
+                    else:
+                        original_tokens = tokenize_alphanumeric(original_value.lower())
+                        if query_variant in original_tokens:
+                            row = all_excel_data[filename].iloc[idx].copy()
+                            row['Source File'] = filename
+                            row['Matched Term'] = query
+                            row['record_id'] = record_id
+                            results.append(row)
+                            seen_records.add(record_id)
+    if results:
+        combined_results = pd.DataFrame(results)
+        return "WARNING: Match found in List!", combined_results, query
+    return "No Threat, Access Granted.", pd.DataFrame(), query
+CHECK_IGNORE_WORDS = {
+    # Mohammed variants
+    'mohammad', 'mohammed', 'mohamed', 'muhammad', 'muhammed', 'muhamad',
+    'mohamad', 'mohammod', 'mahammad', 'mehmed', 'mehmet',
+    # Common filler names — NOT 'ali' (it appears in real names like wali, somali)
+    'kumar', 'kumari', 'ahamad', 'ahmad', 'ahmed',
+    'bin', 'binti', 'binte', 'abd', 'abdul', 'abdur', 'abdel',
+    # Titles/prefixes
+    'md', 'md.', 'mr', 'mr.', 'mrs', 'mrs.', 'ms', 'ms.', 'dr', 'dr.',
+    'haji', 'hajj', 'haj', 'hj', 'sheikh', 'shaikh', 'shaykh',
+}
+
+def _strip_check_ignored(query):
+    """
+    For /check endpoint: split query into tokens, drop any token that is
+    in CHECK_IGNORE_WORDS or shorter than 3 characters, return remaining
+    tokens joined. If nothing remains, return the original query unchanged
+    so we don't search with an empty string.
+    Example: 'MOHAMMED RIFAN' -> 'rifan' (only meaningful token kept)
+             'MOHAMMED ALI'   -> 'ali'   ('ali' is NOT ignored, it is a real name)
+             'KUMAR RAJESH'   -> 'rajesh'
+    """
+    tokens = query.lower().strip().split()
+    kept = [t for t in tokens if len(t) >= 3 and t not in CHECK_IGNORE_WORDS]
+    if not kept:
+        # All tokens were ignored — fall back to longest non-ignored token
+        non_ignored = [t for t in tokens if t not in CHECK_IGNORE_WORDS and len(t) >= 3]
+        return ' '.join(non_ignored) if non_ignored else query.lower().strip()
+    return ' '.join(kept)
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -87,9 +182,9 @@ def load_all_excel_files(folder_path):
     start_time = time.time()
     excel_data = {}
     hash_index = {}
-    check_hash_index = {}  
+    check_hash_index = {}   # Focused index for /check endpoint (specific columns only)
     record_id_map = {}
-    
+
     files = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xls'))]
     for filename in tqdm(files, desc="Loading Excel Files"):
         file_path = os.path.join(folder_path, filename)
@@ -100,64 +195,107 @@ def load_all_excel_files(folder_path):
             name_cols = [col for col in df.columns if col.lower() in NAME_VARIANTS]
             if name_cols:
                 df['Name'] = df[name_cols].agg(' '.join, axis=1).str.strip()
-            
+
             df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
             excel_data[filename] = df
-            
+
             for idx in tqdm(range(len(df)), desc=f"Indexing {filename}", leave=False):
                 row = df.iloc[idx]
                 record_id = row['record_id']
                 record_id_map[record_id] = (filename, idx)
-                
+
+                # --- Build focused check_hash_index for /check endpoint ---
+                # Combine first/second/third name into a single full name and index it
+                name_parts = []
+                for name_col in ['first name', 'second name', 'third name']:
+                    matched_col = next((c for c in df.columns if c.lower() == name_col), None)
+                    if matched_col:
+                        part = str(row[matched_col]).strip()
+                        if part and part.lower() not in ('nan', 'none', ''):
+                            name_parts.append(part)
+                if name_parts:
+                    full_name = ' '.join(name_parts).strip().lower()
+                    if len(full_name) >= 3:
+                        # Index full name
+                        for ft in tokenize_alphanumeric(full_name):
+                            fh = hash(ft)
+                            if fh not in check_hash_index:
+                                check_hash_index[fh] = []
+                            check_hash_index[fh].append((filename, idx, 'full name', full_name, record_id))
+                        # Index each individual name token too
+                        for part in full_name.split():
+                            if len(part) >= 3:
+                                for pt in tokenize_alphanumeric(part):
+                                    ph = hash(pt)
+                                    if ph not in check_hash_index:
+                                        check_hash_index[ph] = []
+                                    check_hash_index[ph].append((filename, idx, 'full name', full_name, record_id))
+
                 for col in df.columns:
                     value = row[col]
                     if isinstance(value, str) and len(value) >= 5:
-                        # Index the whole value
-                        value_hash = hash(value)
-                        if value_hash not in hash_index:
-                            hash_index[value_hash] = []
-                        hash_index[value_hash].append((filename, idx, col, value, record_id))
-                        
-                        # Index comma-separated parts
-                        if ',' in value:
-                            parts = [part.strip() for part in value.split(',')]
-                            for part in parts:
-                                if len(part) >= 5:  # Only index parts that are long enough
-                                    part_hash = hash(part)
-                                    if part_hash not in hash_index:
-                                        hash_index[part_hash] = []
-                                    hash_index[part_hash].append((filename, idx, col, value, record_id))
-                                    
-                                    # Also index space-separated subparts within comma-separated parts
-                                    if ' ' in part:
-                                        subparts = [subpart.strip() for subpart in part.split()]
-                                        for subpart in subparts:
-                                            if len(subpart) >= 5:  # Only index parts that are long enough
-                                                subpart_hash = hash(subpart)
-                                                if subpart_hash not in hash_index:
-                                                    hash_index[subpart_hash] = []
-                                                hash_index[subpart_hash].append((filename, idx, col, value, record_id))
-                                                
-                                                # Also index subparts in check_hash_index if they are in CHECK_INDEX_COLUMNS
-                                                if col.lower() in CHECK_INDEX_COLUMNS:
-                                                    if subpart_hash not in check_hash_index:
-                                                        check_hash_index[subpart_hash] = []
-                                                    check_hash_index[subpart_hash].append((filename, idx, col, value, record_id))
-                        
-                        # Directly index space-separated parts
-                        elif ' ' in value:
-                            parts = [part.strip() for part in value.split()]
-                            for part in parts:
-                                if len(part) >= 5:  # Only index parts that are long enough
-                                    part_hash = hash(part)
-                                    if part_hash not in hash_index:
-                                        hash_index[part_hash] = []
-                                    hash_index[part_hash].append((filename, idx, col, value, record_id))
-                
+                        # --- Index other CHECK_INDEX_COLUMNS (excluding name parts, handled above) ---
+                        if col.lower() in CHECK_INDEX_COLUMNS and col.lower() not in CHECK_NAME_PARTS:
+                            chk_tokens = tokenize_alphanumeric(value)
+                            for chk_token in chk_tokens:
+                                chk_hash = hash(chk_token)
+                                if chk_hash not in check_hash_index:
+                                    check_hash_index[chk_hash] = []
+                                check_hash_index[chk_hash].append((filename, idx, col, value, record_id))
+                                # Also index individual space-separated parts
+                                if ' ' in chk_token:
+                                    for part in chk_token.split():
+                                        if len(part) >= 5:
+                                            for pt in tokenize_alphanumeric(part):
+                                                ph = hash(pt)
+                                                if ph not in check_hash_index:
+                                                    check_hash_index[ph] = []
+                                                check_hash_index[ph].append((filename, idx, col, value, record_id))
+
+                        # --- Build full hash_index for all other endpoints ---
+                        tokens = tokenize_alphanumeric(value)
+                        for token in tokens:
+                            token_hash = hash(token)
+                            if token_hash not in hash_index:
+                                hash_index[token_hash] = []
+                            hash_index[token_hash].append((filename, idx, col, value, record_id))
+                            # Index comma-separated parts
+                            if ',' in token:
+                                parts = [part.strip() for part in token.split(',')]
+                                for part in parts:
+                                    if len(part) >= 5:
+                                        part_tokens = tokenize_alphanumeric(part)
+                                        for part_token in part_tokens:
+                                            part_hash = hash(part_token)
+                                            if part_hash not in hash_index:
+                                                hash_index[part_hash] = []
+                                            hash_index[part_hash].append((filename, idx, col, value, record_id))
+                                            # Also index space-separated subparts within comma-separated parts
+                                            if ' ' in part_token:
+                                                subparts = [subpart.strip() for subpart in part_token.split()]
+                                                for subpart in subparts:
+                                                    if len(subpart) >= 5:
+                                                        subpart_tokens = tokenize_alphanumeric(subpart)
+                                                        for sp_token in subpart_tokens:
+                                                            subpart_hash = hash(sp_token)
+                                                            if subpart_hash not in hash_index:
+                                                                hash_index[subpart_hash] = []
+                                                            hash_index[subpart_hash].append((filename, idx, col, value, record_id))
+                            # Directly index space-separated parts
+                            elif ' ' in token:
+                                parts = [part.strip() for part in token.split()]
+                                for part in parts:
+                                    if len(part) >= 5:
+                                        part_tokens = tokenize_alphanumeric(part)
+                                        for part_token in part_tokens:
+                                            part_hash = hash(part_token)
+                                            if part_hash not in hash_index:
+                                                hash_index[part_hash] = []
+                                            hash_index[part_hash].append((filename, idx, col, value, record_id))
         except Exception as e:
             print(f"Error loading {filename}: {e}")
-    
-    print(f"Finished loading {len(excel_data)} files and building index with {len(hash_index)} keys in {time.time() - start_time:.2f} seconds")
+
+    print(f"Finished loading {len(excel_data)} files and building index with {len(hash_index)} keys ({len(check_hash_index)} check-specific keys) in {time.time() - start_time:.2f} seconds")
     return excel_data, hash_index, check_hash_index, record_id_map
 
 all_excel_data, hash_index, check_hash_index, record_id_map = load_all_excel_files(EXCEL_FOLDER)
@@ -165,81 +303,173 @@ all_excel_data, hash_index, check_hash_index, record_id_map = load_all_excel_fil
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def fuzzy_search(query, field=None, threshold=80):
-    """Fuzzy search across all records using similarity matching with smart tokenization"""
-    query = str(query).lower().strip()
-    if len(query) < 3:
-        return "Query must be at least 3 characters long.", pd.DataFrame(), query
-    
-    if any(keyword.lower() in query for keyword in IGNORE_KEYWORDS):
-        return "Query contains ignored keyword(s).", pd.DataFrame(), query
-    
-    # Tokenize query for alphanumeric handling
-    query_tokens = tokenize_alphanumeric(query)
-    
+def fuzzy_search_check(query, threshold=80):
+    """
+    Fuzzy search for /check endpoint — scans only CHECK_INDEX_COLUMNS.
+    Strips CHECK_IGNORE_WORDS from query before scoring.
+    Scores against full cell value AND each individual token (min 3 chars).
+    Cell tokens that are in CHECK_IGNORE_WORDS are also skipped.
+    """
+    from difflib import SequenceMatcher
+
+    # Strip ignored words from query (mohammed ali -> ali, or just meaningful part)
+    cleaned_query = _strip_check_ignored(query)
+    query_lower = cleaned_query.lower().strip()
+
+    if len(query_lower) < 3:
+        return []
+
     results = []
-    seen_records = set()  # Avoid duplicates
-    
-    # Search through all Excel files
+    seen_records = set()
+
     for filename, df in all_excel_data.items():
-        for idx, row in df.iterrows():
-            record_id = row.get('record_id')
+        for idx in range(len(df)):
+            row = df.iloc[idx]
+            record_id = row.get('record_id', '')
             if record_id in seen_records:
                 continue
-            
-            # Check each column for fuzzy match
+
+            best_score = 0
+            best_matched_col = ''
+            best_matched_val = ''
+
+            # Check combined full name (first + second + third name)
+            name_parts = []
+            for name_col in ['first name', 'second name', 'third name']:
+                matched_col = next((c for c in df.columns if c.lower() == name_col), None)
+                if matched_col:
+                    part = str(row[matched_col]).strip().lower()
+                    if part and part not in ('nan', 'none', ''):
+                        name_parts.append(part)
+            if name_parts:
+                full_name = ' '.join(name_parts).strip()
+                cleaned_cell_name = _strip_check_ignored(full_name)
+                if len(cleaned_cell_name) >= 3:
+                    score_full = SequenceMatcher(None, query_lower, cleaned_cell_name).ratio() * 100
+                    if score_full > best_score:
+                        best_score = score_full
+                        best_matched_col = 'full name'
+                        best_matched_val = full_name
+                # Token-by-token (min 3 chars, skip ignored, short-token guard)
+                for token in full_name.split():
+                    if len(token) < 3 or token in CHECK_IGNORE_WORDS:
+                        continue
+                        # Short query guard: short queries only match short full names (<=2 meaningful words)
+                    if len(query_lower) <= 4:
+                        cleaned_fn = _strip_check_ignored(full_name)
+                        if len(cleaned_fn.split()) > 2:
+                            continue
+                    s = SequenceMatcher(None, query_lower, token).ratio() * 100
+                    if s > best_score:
+                        best_score = s
+                        best_matched_col = 'full name'
+                        best_matched_val = full_name
+
+            # Check other focused columns (skip name parts, already handled above)
             for col in df.columns:
-                if field and field != "All Fields" and col != field:
+                if col.lower() not in CHECK_INDEX_COLUMNS or col.lower() in CHECK_NAME_PARTS:
                     continue
-                
-                value = row[col]
-                if isinstance(value, str) and len(value) >= 3:
-                    # Tokenize cell value for alphanumeric handling
-                    value_tokens = tokenize_alphanumeric(value)
-                    
-                    # Try all combinations of query tokens vs value tokens
-                    similarity = 0
-                    for q_token in query_tokens:
-                        for v_token in value_tokens:
-                            # Calculate similarity score
-                            score = fuzz.ratio(q_token, v_token)
-                            
-                            # Also check partial matches for longer strings
-                            if len(v_token) > 10:
-                                partial_score = fuzz.partial_ratio(q_token, v_token)
-                                score = max(score, partial_score)
-                            
-                            # Check token-based similarity (word order independent)
-                            token_score = fuzz.token_sort_ratio(q_token, v_token)
-                            score = max(score, token_score)
-                            
-                            # Keep the best similarity across all token combinations
-                            similarity = max(similarity, score)
+                cell_value = str(row[col]).lower().strip()
+                if len(cell_value) < 3:
+                    continue
 
-                    
-                    if similarity >= threshold:
-                        result_row = row.copy()
-                        result_row['Source File'] = filename
-                        result_row['Matched Term'] = value
-                        result_row['Match Score'] = f"{similarity}%"
-                        result_row['Match Type'] = 'Fuzzy'
-                        result_row['record_id'] = record_id
-                        results.append(result_row)
-                        seen_records.add(record_id)
-                        break  # Move to next record
-    
-    if results:
-        combined_results = pd.DataFrame(results)
-        # Sort by match score descending
-        combined_results['_score'] = combined_results['Match Score'].str.replace('%', '').astype(float)
-        combined_results = combined_results.sort_values('_score', ascending=False)
-        combined_results = combined_results.drop('_score', axis=1)
-        return "WARNING: Match found in List!", combined_results, query
-    return "No Threat, Access Granted.", pd.DataFrame(), query
+                # Score against full cell value (after stripping ignored words)
+                cleaned_cell = _strip_check_ignored(cell_value)
+                if len(cleaned_cell) >= 3:
+                    score_full = SequenceMatcher(None, query_lower, cleaned_cell).ratio() * 100
+                    if score_full > best_score:
+                        best_score = score_full
+                        best_matched_col = col
+                        best_matched_val = cell_value
 
-def search_by_index(query, field=None):
-    """Only uses fuzzy search with fixed 80% threshold"""
-    return fuzzy_search(query, field, threshold=80)
+                # Token-by-token (min 3 chars, skip ignored, short-query guard)
+                for token in cell_value.split():
+                    if len(token) < 3 or token in CHECK_IGNORE_WORDS:
+                        continue
+                    # Short query guard: short queries only accepted if the cleaned
+                    # cell itself is short (<=2 meaningful words)
+                    if len(query_lower) <= 4:
+                        cleaned_cv = _strip_check_ignored(cell_value)
+                        if len(cleaned_cv.split()) > 2:
+                            continue
+                    score_token = SequenceMatcher(None, query_lower, token).ratio() * 100
+                    if score_token > best_score:
+                        best_score = score_token
+                        best_matched_col = col
+                        best_matched_val = cell_value
+
+                if best_score >= threshold:
+                    break
+
+            if best_score >= threshold:
+                seen_records.add(record_id)
+                record_dict = row.to_dict()
+                record_dict['Source File'] = filename
+                record_dict['Matched Term'] = query
+                record_dict['Matched Column'] = best_matched_col
+                record_dict['Matched Value'] = best_matched_val
+                results.append((record_dict, round(best_score, 2)))
+
+    return results
+
+def search_by_check_index(query):
+    """
+    Direct hash lookup using check_hash_index (specific columns only).
+    Used exclusively by the /check endpoint.
+    Strips CHECK_IGNORE_WORDS tokens from query before searching.
+    Minimum token length: 3 characters.
+    """
+    # Strip ignored words (mohammed, kumar, etc.) from query first
+    cleaned_query = _strip_check_ignored(query)
+    query_lower = cleaned_query.lower().strip()
+
+    if len(query_lower) < 3:
+        return pd.DataFrame()
+
+    results = []
+    seen_records = set()
+    # Tokenize and drop any remaining short or ignored tokens
+    query_tokens = {t for t in tokenize_alphanumeric(query_lower)
+                    if len(t) >= 3 and t not in CHECK_IGNORE_WORDS}
+
+    for query_variant in query_tokens:
+        query_hash = hash(query_variant)
+        if query_hash in check_hash_index:
+            for filename, idx, col, original_value, record_id in check_hash_index[query_hash]:
+                if record_id in seen_records:
+                    continue
+
+                orig_lower = original_value.lower()
+
+                # Verify it's a real match not just a hash collision
+                orig_tokens = tokenize_alphanumeric(orig_lower)
+                cell_parts = set()
+                cell_parts.update(orig_tokens)
+                for t in orig_lower.split():
+                    cell_parts.update(tokenize_alphanumeric(t))
+
+                if query_variant not in cell_parts:
+                    continue
+
+                # Short token guard: if cleaned query is short (<=4 chars),
+                # only accept if the entire cell value (after stripping ignored words)
+                # is also short (<=2 words). Prevents 'ali' matching
+                # 'abdul salam hanafi ali mardan' but allows it to match 'ali' or 'wali ali'.
+                if len(query_variant) <= 4:
+                    cleaned_cell = _strip_check_ignored(orig_lower)
+                    if len(cleaned_cell.split()) > 2:
+                        continue
+
+                row = all_excel_data[filename].iloc[idx].copy()
+                row['Source File'] = filename
+                # Log which column and value triggered the match
+                row['Matched Term'] = query
+                row['Matched Column'] = col
+                row['Matched Value'] = original_value
+                results.append(row)
+                seen_records.add(record_id)
+
+    return pd.DataFrame(results) if results else pd.DataFrame() 
 
 def process_upload_file(file_path):
     file_ext = file_path.rsplit('.', 1)[1].lower()
@@ -472,53 +702,86 @@ import csv
 
 def log_to_csv(input_data, output_data, folder_name="Auto_Check"):
     """
-    Simple function to log complete input and output data to CSV file
+    Log /check endpoint requests and responses to a daily CSV file.
+    Includes match_type (direct/fuzzy) and fuzzy_confidence per entry.
     """
     try:
-        # Create folder if it doesn't exist
-        if not os.path.exists(folder_name):
-            os.makedirs(folder_name)
-        
+        # Always resolve folder relative to this script, not Flask's cwd
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        folder_path = os.path.join(base_dir, folder_name)
+        os.makedirs(folder_path, exist_ok=True)
+
         # Generate filename with current date
         current_date = datetime.now().strftime("%Y-%m-%d")
-        csv_filename = f"{folder_name}/check_log_{current_date}.csv"
-        
+        csv_filename = os.path.join(folder_path, f"check_log_{current_date}.csv")
+        print(f"[log_to_csv] Writing to: {csv_filename}")
+
         # Check if file exists to determine if we need headers
         file_exists = os.path.isfile(csv_filename)
-        
-        # Convert matches to JSON string for storage
-        matches_json = json.dumps(output_data.get('matches', []), ensure_ascii=False)
-        
-        # Prepare log data with all output information
+
+        # Pull matches list
+        matches = output_data.get('matches', [])
+
+        # Summarise match types and fuzzy confidences
+        match_types = sorted({m.get('match_type', 'direct') for m in matches if isinstance(m, dict)})
+        fuzzy_confidences = [
+            str(m.get('fuzzy_confidence', ''))
+            for m in matches
+            if isinstance(m, dict) and m.get('match_type') == 'fuzzy'
+        ]
+
+        # Build a compact per-match summary: name|source|match_type|confidence
+        match_summary_rows = []
+        for m in matches:
+            if isinstance(m, dict):
+                rid = m.get('record_id', 'N/A')
+                mtype = m.get('match_type', 'direct')
+                conf = m.get('fuzzy_confidence', 100.0)
+                name = m.get('Name', m.get('name', ''))
+                src = m.get('Source File', '')
+                match_summary_rows.append(f"{name}|{src}|{mtype}|{conf}")
+
+        # These fieldnames MUST exactly match the log_entry keys below
+        fieldnames = [
+            'timestamp',
+            'input_keyword',
+            'query_used',
+            'output_status',
+            'result_message',
+            'matched_term',
+            'matches_count',
+            'match_types',
+            'fuzzy_confidences',
+            'match_summary',
+            'matches_details',
+            'error_message',
+        ]
+
         log_entry = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'input_keyword': input_data.get('keyword', ''),
+            'query_used': output_data.get('query_used', input_data.get('keyword', '')),
             'output_status': output_data.get('status', ''),
             'result_message': output_data.get('result_message', ''),
             'matched_term': output_data.get('matched_term', ''),
-            'matches_count': len(output_data.get('matches', [])),
-            'matches_details': matches_json,
-            'parts_checked': str(output_data.get('parts_checked', [])),
+            'matches_count': len(matches),
+            'match_types': ', '.join(match_types) if match_types else '',
+            'fuzzy_confidences': ', '.join(fuzzy_confidences) if fuzzy_confidences else '',
+            'match_summary': ' ;; '.join(match_summary_rows) if match_summary_rows else '',
+            'matches_details': json.dumps(matches, ensure_ascii=False),
             'error_message': output_data.get('error', ''),
-         }
-        
-        # Write to CSV
+        }
+
         with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['timestamp', 'input_keyword', 'request_method', 'is_json', 
-                         'output_status', 'result_message', 'matched_term', 
-                         'matches_count', 'matches_details', 'parts_checked', 
-                         'error_message', 'full_response']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            
-            # Write header if file is new
             if not file_exists:
                 writer.writeheader()
-            
-            # Write log entry
             writer.writerow(log_entry)
-            
+
+        print(f"[log_to_csv] Logged to {csv_filename} — status={log_entry['output_status']}, matches={log_entry['matches_count']}, types={log_entry['match_types']}")
+
     except Exception as e:
-        print(f"Error logging to CSV: {str(e)}")
+        print(f"[log_to_csv] ERROR: {type(e).__name__}: {str(e)}")
 
 # Modify the route handler to support stages
 @app.route('/', methods=['GET', 'POST'])
@@ -590,74 +853,65 @@ def check():
         'method': request.method,
         'is_json': request.is_json
     }
-    
+
     if request.is_json:
         data = request.get_json()
         query = data.get('keyword', '').strip()
     else:
         query = request.form.get('keyword', '').strip()
-    
+
     input_data['keyword'] = query
-    
+
     if not query:
         error_response = {'error': 'No keyword provided', 'status': 'failure'}
-        # Log error case
         log_to_csv(input_data, error_response)
         return jsonify(error_response), 400
-    
-    # Check for multiple terms (comma or space separated)
-    all_results = []
+
     all_matches = []
-    
-    # First check the full query
-    result_message, matches, matched_term = search_by_index(query, field=None)
-    
+
+    # Strip ignored words from query for /check (mohammed ali -> ali)
+    cleaned_query = _strip_check_ignored(query)
+
+    # --- Step 1: Direct hash lookup using check_hash_index (focused columns only) ---
+    matches = search_by_check_index(query)  # internally strips ignored words
+    matched_term = cleaned_query
+
     if not matches.empty:
-        all_results.append(result_message)
-        all_matches.extend(matches.to_dict(orient='records'))
-    
-    # Then check individual parts if the full query doesn't match
-    else:
-        # Split by both commas and spaces
-        parts = []
-        # First split by commas
-        comma_parts = [part.strip() for part in query.split(',')]
-        # Then process each comma part
-        for part in comma_parts:
-            if len(part) >= 5:  # Only consider parts that are long enough
-                parts.append(part)
-            # Split by spaces
-            space_parts = [sp.strip() for sp in part.split()]
-            for sp in space_parts:
-                if len(sp) >= 5:  # Only consider parts that are long enough
-                    parts.append(sp)
-        
-        # Check each part
-        for part in parts:
-            part_result, part_matches, part_term = search_by_index(part, field=None)
-            if not part_matches.empty:
-                all_results.append(part_result)
-                all_matches.extend(part_matches.to_dict(orient='records'))
-    
-    # Determine final result message
+        for record in matches.to_dict(orient='records'):
+            record['match_type'] = 'direct'
+            record['fuzzy_confidence'] = 100.0
+            all_matches.append(record)
+
+    # --- Step 2: Fuzzy match (focused columns only, >=80% threshold) ---
+    # Only run if no direct matches found, to avoid duplicates
+    if not all_matches:
+        fuzzy_results = fuzzy_search_check(query, threshold=80)
+        for record_dict, score in fuzzy_results:
+            record_dict['match_type'] = 'fuzzy'
+            record_dict['fuzzy_confidence'] = score
+            all_matches.append(record_dict)
+
+    # Determine final result
     if all_matches:
         final_message = "WARNING: Match found in List!"
         status = 'success'
     else:
         final_message = "No Threat, Access Granted."
         status = 'no_match'
-    
+        matched_term = query
+
     response = {
         'result_message': final_message,
         'matched_term': matched_term,
         'matches': all_matches,
         'status': status,
-        'parts_checked': parts if 'parts' in locals() else [query]
+        'query_used': query,           # Original input as received
+        'query_searched': cleaned_query  # After stripping ignored words
     }
-    
+
     # Log the request and response
     log_to_csv(input_data, response)
-    
+
     return jsonify(response)
 
 @app.route('/get_record_details', methods=['POST'])
