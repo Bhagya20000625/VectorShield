@@ -234,6 +234,37 @@ def load_all_excel_files(folder_path):
                 df['Name'] = df[name_cols].agg(' '.join, axis=1).str.strip()
                 df['normalized_name'] = df['Name'].apply(normalize_name)
 
+            # DOB parsing
+            dob_col = next(
+                (c for c in df.columns if c.lower() in ('birth day', 'date of birth', 'dob')),
+                None
+            )
+            if dob_col:
+                parsed = df[dob_col].apply(lambda v: parse_dob(str(v)))
+                df['birth_year'] = parsed.apply(lambda t: t[1])
+            else:
+                df['birth_year'] = None
+
+            # Data quality score
+            quality_fields = {
+                'name': 2, 'date of birth': 2, 'reference number': 2,
+                'document number': 2, 'nic no.': 2, 'dl/ passport no.': 2,
+                'nationality': 1, 'place of birth': 1, 'aliases': 1, 'address': 1,
+            }
+            max_score = sum(quality_fields.values())
+
+            def calc_quality(row):
+                score = 0
+                for field, weight in quality_fields.items():
+                    col_match = next((c for c in df.columns if c.lower() == field), None)
+                    if col_match:
+                        val = str(row[col_match]).strip().lower()
+                        if val and val not in ('nan', 'none', ''):
+                            score += weight
+                return round(score / max_score * 100, 1)
+
+            df['data_quality_score'] = df.apply(calc_quality, axis=1)
+
             df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
             excel_data[filename] = df
 
