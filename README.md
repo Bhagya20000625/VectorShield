@@ -9,6 +9,7 @@ This is the **backend API** for VectorShield. The frontend is built separately u
 ## Features
 
 - ✅ **Fuzzy Name Matching** - 80% similarity threshold using RapidFuzz
+- ✅ **Name Normalization** - Accent removal, connector word stripping (bin, al, de...), token sorting for accurate cross-script matching
 - ✅ **Batch File Upload** - Process CSV/Excel files with multiple records
 - ✅ **PDF/Excel Export** - Generate comprehensive reports
 - ✅ **Analytics & Risk Scoring** - Automated risk assessment
@@ -19,6 +20,7 @@ This is the **backend API** for VectorShield. The frontend is built separately u
 **Backend:**
 - Flask (Python web framework)
 - RapidFuzz (Fuzzy string matching)
+- Unidecode (Accent/diacritic removal for name normalization)
 - Pandas (Data processing)
 - ReportLab (PDF generation)
 - OpenPyXL (Excel generation)

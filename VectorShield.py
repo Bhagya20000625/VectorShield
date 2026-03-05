@@ -17,6 +17,7 @@ from collections import Counter  # Added for analysis
 import openpyxl  # For Excel export
 import re
 from rapidfuzz import fuzz, process  # For fuzzy name matching
+from unidecode import unidecode  # For normalizing names with accents
 
 app = Flask(__name__)
 app.secret_key = 'threatcipher_secret_key'
@@ -177,6 +178,27 @@ def tokenize_alphanumeric(value):
     
     return tokens
 
+CONNECTORS = {
+    'bin', 'binti', 'ibn', 'al', 'de', 'van', 'von', 'el',
+    'du', 'la', 'le', 'di', 'das', 'dos', 'der', 'den'
+}
+
+def normalize_name(name: str) -> str:
+    if not name or not isinstance(name, str):
+        return ''
+    name = name.lower()
+    name = unidecode(name)                  # remove accents: é→e, ü→u
+    name = re.sub(r'[^\w\s]', ' ', name)   # remove punctuation
+    tokens = name.split()
+    tokens = [
+        t for t in tokens
+        if t not in CONNECTORS              # remove connectors
+        and not t.isdigit()                 # remove digit-only tokens
+        and len(t) > 1                      # remove single characters
+    ]
+    tokens.sort()                           # alphabetical sort
+    return ' '.join(tokens)
+
 def load_all_excel_files(folder_path):
     print("Loading excel files and building hash-based search index...")
     start_time = time.time()
@@ -195,6 +217,7 @@ def load_all_excel_files(folder_path):
             name_cols = [col for col in df.columns if col.lower() in NAME_VARIANTS]
             if name_cols:
                 df['Name'] = df[name_cols].agg(' '.join, axis=1).str.strip()
+                df['normalized_name'] = df['Name'].apply(normalize_name)
 
             df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
             excel_data[filename] = df
