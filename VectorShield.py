@@ -205,6 +205,38 @@ def validate_id(id_value) -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9]', '', str(id_value))
     return cleaned if len(cleaned) >= 2 else None
 
+_DOB_FORMATS = [
+    '%Y-%m-%d',
+    '%d/%m/%Y',
+    '%m/%d/%Y',
+    '%d-%m-%Y',
+]
+
+def parse_dob(dob_value):
+    """
+    Parse a date-of-birth string and return (dob_string, birth_year).
+    Tries multiple common formats. Handles 4-digit year-only strings.
+    Returns (None, None) on failure.
+    """
+    if not dob_value or not isinstance(dob_value, str):
+        return None, None
+    dob_value = dob_value.strip()
+    if not dob_value or dob_value.lower() in ('nan', 'none', ''):
+        return None, None
+    # Year-only: exactly 4 digits
+    if re.fullmatch(r'\d{4}', dob_value):
+        year = int(dob_value)
+        if 1900 <= year <= 2100:
+            return dob_value, year
+        return None, None
+    for fmt in _DOB_FORMATS:
+        try:
+            dt = datetime.strptime(dob_value, fmt)
+            return dt.strftime('%Y-%m-%d'), dt.year
+        except ValueError:
+            continue
+    return None, None
+
 def load_all_excel_files(folder_path):
     print("Loading excel files and building hash-based search index...")
     start_time = time.time()
@@ -224,6 +256,17 @@ def load_all_excel_files(folder_path):
             if name_cols:
                 df['Name'] = df[name_cols].agg(' '.join, axis=1).str.strip()
                 df['normalized_name'] = df['Name'].apply(normalize_name)
+
+            # DOB parsing: try 'birth day', 'date of birth', 'dob' columns
+            dob_col = next(
+                (c for c in df.columns if c.lower() in ('birth day', 'date of birth', 'dob')),
+                None
+            )
+            if dob_col:
+                parsed = df[dob_col].apply(lambda v: parse_dob(str(v)))
+                df['birth_year'] = parsed.apply(lambda t: t[1])
+            else:
+                df['birth_year'] = None
 
             df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
             excel_data[filename] = df
@@ -526,6 +569,8 @@ def process_csv_file(file_path):
                 if col in chunk.columns:
                     chunk[col] = chunk[col].fillna("None").astype(str).str.strip()
             chunk['Full Name'] = chunk['First Name'] + ' ' + chunk['Last Name']
+            parsed_dobs = chunk['Birth Day'].apply(lambda v: parse_dob(str(v)))
+            chunk['birth_year'] = parsed_dobs.apply(lambda t: t[1])
             processed_chunks.append(chunk)
             
         df = pd.concat(processed_chunks)
@@ -547,6 +592,8 @@ def process_excel_file(file_path):
                 df[col] = df[col].fillna("None").astype(str).str.strip()
                 
         df['Full Name'] = df['First Name'] + ' ' + df['Last Name']
+        parsed_dobs = df['Birth Day'].apply(lambda v: parse_dob(str(v)))
+        df['birth_year'] = parsed_dobs.apply(lambda t: t[1])
         
         return df, None
     except Exception as e:
