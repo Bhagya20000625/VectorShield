@@ -199,6 +199,12 @@ def normalize_name(name: str) -> str:
     tokens.sort()                           # alphabetical sort
     return ' '.join(tokens)
 
+def validate_id(id_value) -> str:
+    if not id_value or not isinstance(id_value, str):
+        return None
+    cleaned = re.sub(r'[^a-zA-Z0-9]', '', str(id_value))
+    return cleaned if len(cleaned) >= 2 else None
+
 def load_all_excel_files(folder_path):
     print("Loading excel files and building hash-based search index...")
     start_time = time.time()
@@ -604,12 +610,19 @@ def search_batch_gpu_staged(batch_data):
         
         # Stage 1: ID and contact info search
         if stage == 1:
-            for field in ['NIC', 'Passport', 'Phone11']:
-                if field in row and row[field] and len(str(row[field])) >= 5:
-                    term = str(row[field]).lower()
+            for field in ['NIC', 'Passport']:
+                val = validate_id(str(row[field])) if field in row and row[field] else None
+                if val:
+                    term = val.lower()
                     if not any(keyword.lower() in term for keyword in IGNORE_KEYWORDS):
                         search_terms.append(term)
                         fields.append(field)
+            # Phone11 keeps >= 5 guard (not a document ID)
+            if 'Phone11' in row and row['Phone11'] and len(str(row['Phone11'])) >= 5:
+                term = str(row['Phone11']).lower()
+                if not any(keyword.lower() in term for keyword in IGNORE_KEYWORDS):
+                    search_terms.append(term)
+                    fields.append('Phone11')
         
         # Stage 2: First Name OR Last Name
         elif stage == 2:
