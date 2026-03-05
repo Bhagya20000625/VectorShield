@@ -339,7 +339,6 @@ def fuzzy_search_check(query, threshold=80):
     Scores against full cell value AND each individual token (min 3 chars).
     Cell tokens that are in CHECK_IGNORE_WORDS are also skipped.
     """
-    from difflib import SequenceMatcher
 
     # Strip ignored words from query (mohammed ali -> ali, or just meaningful part)
     cleaned_query = _strip_check_ignored(query)
@@ -381,7 +380,7 @@ def fuzzy_search_check(query, threshold=80):
                     continue
                 cleaned_cell_name = _strip_check_ignored(full_name)
                 if len(cleaned_cell_name) >= 3:
-                    score_full = SequenceMatcher(None, query_lower, cleaned_cell_name).ratio() * 100
+                    score_full = fuzz.token_sort_ratio(query_lower, cleaned_cell_name) * 0.60
                     if score_full > best_score:
                         best_score = score_full
                         best_matched_col = 'full name'
@@ -395,7 +394,7 @@ def fuzzy_search_check(query, threshold=80):
                         cleaned_fn = _strip_check_ignored(full_name)
                         if len(cleaned_fn.split()) > 2:
                             continue
-                    s = SequenceMatcher(None, query_lower, token).ratio() * 100
+                    s = fuzz.token_sort_ratio(query_lower, token) * 0.60
                     if s > best_score:
                         best_score = s
                         best_matched_col = 'full name'
@@ -411,8 +410,12 @@ def fuzzy_search_check(query, threshold=80):
 
                 # Score against full cell value (after stripping ignored words)
                 cleaned_cell = _strip_check_ignored(cell_value)
+                weight = 1.00 if col.lower() in ('document number', 'nic no.', 'dl/ passport no.', 'reference number', 'id') \
+                         else 0.30 if col.lower() == 'date of birth' \
+                         else 0.20 if col.lower() == 'nationality' \
+                         else 0.60
                 if len(cleaned_cell) >= 3:
-                    score_full = SequenceMatcher(None, query_lower, cleaned_cell).ratio() * 100
+                    score_full = fuzz.token_sort_ratio(query_lower, cleaned_cell) * weight
                     if score_full > best_score:
                         best_score = score_full
                         best_matched_col = col
@@ -428,7 +431,7 @@ def fuzzy_search_check(query, threshold=80):
                         cleaned_cv = _strip_check_ignored(cell_value)
                         if len(cleaned_cv.split()) > 2:
                             continue
-                    score_token = SequenceMatcher(None, query_lower, token).ratio() * 100
+                    score_token = fuzz.token_sort_ratio(query_lower, token) * weight
                     if score_token > best_score:
                         best_score = score_token
                         best_matched_col = col
