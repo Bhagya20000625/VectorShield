@@ -16,6 +16,7 @@ from tqdm import tqdm
 from collections import Counter  # Added for analysis
 import openpyxl  # For Excel export
 import re
+import multiprocessing
 from rapidfuzz import fuzz, process  # For fuzzy name matching
 from unidecode import unidecode  # For normalizing names with accents
 
@@ -617,11 +618,12 @@ def search_from_uploaded_data_staged(df, stage=1):
     csv_entries = {}
     matched_terms = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_batch = {executor.submit(search_batch_gpu_staged, batch): batch for batch in batches}
-        for future in tqdm(concurrent.futures.as_completed(future_to_batch), total=len(batches), desc=f"Processing Batches (Stage {stage})"):
-            batch_results, batch_entries, batch_terms = future.result()
-            
+    with multiprocessing.Pool(processes=MAX_WORKERS) as pool:
+        for batch_results, batch_entries, batch_terms in tqdm(
+            pool.imap_unordered(search_batch_gpu_staged, batches),
+            total=len(batches),
+            desc=f"Processing Batches (Stage {stage})"
+        ):
             for idx, df in batch_results.items():
                 grouped_results[idx] = df
             for idx, entry in batch_entries.items():
@@ -1709,4 +1711,5 @@ def analyze_data():
     return jsonify(response)
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    multiprocessing.freeze_support()
+    app.run(debug=True)
