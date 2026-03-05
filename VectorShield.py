@@ -23,6 +23,7 @@ app = Flask(__name__)
 app.secret_key = 'threatcipher_secret_key'
 
 EXCEL_FOLDER = 'Excel_files'
+PARQUET_FOLDER = 'Excel_files/parquet_cache'
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls'}
 MAX_WORKERS = 4
@@ -217,8 +218,16 @@ def load_all_excel_files(folder_path):
     for filename in tqdm(files, desc="Loading Excel Files"):
         file_path = os.path.join(folder_path, filename)
         try:
-            df = pd.read_excel(file_path)
-            df = df.astype(str).apply(lambda x: x.str.strip().str.lower())
+            parquet_path = os.path.join(PARQUET_FOLDER, filename.rsplit('.', 1)[0] + '.parquet')
+            os.makedirs(PARQUET_FOLDER, exist_ok=True)
+
+            if os.path.exists(parquet_path) and os.path.getmtime(parquet_path) >= os.path.getmtime(file_path):
+                df = pd.read_parquet(parquet_path)
+            else:
+                df = pd.read_excel(file_path)
+                df = df.astype(str).apply(lambda x: x.str.strip().str.lower())
+                df.fillna('', inplace=True)
+                df.to_parquet(parquet_path, index=False)
             df.fillna('', inplace=True)
             name_cols = [col for col in df.columns if col.lower() in NAME_VARIANTS]
             if name_cols:
