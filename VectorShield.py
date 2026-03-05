@@ -447,6 +447,7 @@ def fuzzy_search_check(query, threshold=80):
                 record_dict['Matched Term'] = query
                 record_dict['Matched Column'] = best_matched_col
                 record_dict['Matched Value'] = best_matched_val
+                record_dict['risk_tier'] = 'High Risk' if best_score >= 90 else 'Possible Match'
                 results.append((record_dict, round(best_score, 2)))
 
     return results
